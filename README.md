@@ -18,7 +18,7 @@ yarn add s3-chunk-uploader
 
 ## Usage
 
-Here is an example of how to use the `ChunkUploader` class to upload a video file in chunks:
+Here is an example of how to use the `ChunkUploader` class to upload a Media Blob in chunks:
 
 ```javascript
 const uploader = new ChunkUploader({
@@ -29,7 +29,7 @@ const uploader = new ChunkUploader({
 
 const url = await uploader.uploadMediaInChunks({
   blob: Blob,
-  key: "/path/to/video.mp4",
+  key: "/path/to/media",
   bucket: "bucket-name",
   ACL: "public-read",
   strategy: "parallel",
