@@ -68,12 +68,14 @@ class ChunkUploader {
     key,
     ACL,
     strategy = "serial",
+    onProgress,
   }: {
     blob: Blob;
     bucket: string;
     key: string;
     ACL: AWS.S3.BucketCannedACL;
     strategy: "parallel" | "serial";
+    onProgress?: (progress: number) => void;
   }): Promise<string | undefined> {
     const chunks = [];
     let offset = 0;
@@ -100,6 +102,7 @@ class ChunkUploader {
 
     let parts: Part[] = [];
     let temp: Part[] = [];
+    let uploadedBytes = 0;
     if (strategy === "serial") {
       for (let index = 0; index < chunks.length; index++) {
         const chunk = chunks[index];
@@ -112,6 +115,11 @@ class ChunkUploader {
         };
         const part = await this.uploadChunkWithRetry(partParams);
         temp.push(part);
+        uploadedBytes += chunk.size;
+        if (onProgress) {
+          const progress = (uploadedBytes / blob.size) * 100;
+          onProgress(progress);
+        }
       }
     } else if (strategy === "parallel") {
       const partsPromises = chunks.map((chunk, index) => {
@@ -122,7 +130,14 @@ class ChunkUploader {
           UploadId: uploadId,
           Body: chunk,
         };
-        return this.uploadChunkWithRetry(partParams);
+        return this.uploadChunkWithRetry(partParams).then((part) => {
+          uploadedBytes += chunk.size;
+          if (onProgress) {
+            const progress = (uploadedBytes / blob.size) * 100;
+            onProgress(progress);
+          }
+          return part;
+        });
       });
       temp = await Promise.all(partsPromises);
     }
