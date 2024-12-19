@@ -33,6 +33,9 @@ const url = await uploader.uploadMediaInChunks({
   bucket: "bucket-name",
   ACL: "public-read",
   strategy: "parallel",
+  onProgress: (event) => {
+    console.log(`Upload progress: ${event.progress}%`);
+  },
 });
 ```
 
@@ -46,6 +49,7 @@ const url = await uploader.uploadMediaInChunks({
 - `bucket`: The name of the S3 bucket.
 - `ACL`: The access control list for the uploaded file (e.g., `public-read`).
 - `strategy`: The upload strategy (e.g., `parallel`).
+- `onProgress`: A callback function to track the upload progress.
 
 ## License
 

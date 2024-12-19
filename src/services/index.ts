@@ -1,26 +1,29 @@
 import AWS from "aws-sdk";
 
 type Part = { ETag: string | undefined; PartNumber: number };
+type ProgressEvent = {
+  progress: number;
+};
+type Strategy = "parallel" | "serial";
 
 /**
- * Uploads a media file to S3 in chunks.
- *
- * @param {Object} params - The parameters for the upload.
- * @param {Blob} params.blob - The media file to upload.
- * @param {string} params.bucket - The S3 bucket to upload to.
- * @param {string} params.key - The key for the uploaded file.
- * @param {AWS.S3.BucketCannedACL} params.ACL - The ACL for the uploaded file.
- * @param {"parallel" | "serial"} [params.strategy="serial"] - The strategy to use for uploading chunks.
- *        "serial" uploads chunks one after another, while "parallel" uploads chunks concurrently.
- *
- * @returns {Promise<string | undefined>} - The URL of the uploaded file, or undefined if the upload fails.
- *
- * @throws {Error} - Throws an error if the upload fails after the maximum number of retries.
+ * Class to handle chunked uploads to S3.
  */
 class ChunkUploader {
   private s3: AWS.S3;
+
   private MAX_RETRIES: number;
+
   private MIN_CHUNK_SIZE: number;
+
+  private totalChunks: number = 0;
+
+  private totalProgress: number = 0;
+
+  private totalFileSize: number = 0;
+
+  private parallelProgressTracker: { [key: number]: number } = {};
+
   constructor({
     accessKeyId,
     secretAccessKey,
@@ -43,41 +46,140 @@ class ChunkUploader {
     this.MAX_RETRIES = MAX_RETRIES;
     this.MIN_CHUNK_SIZE = MIN_CHUNK_SIZE;
   }
-  private async delay(ms: number) {
-    return new Promise((resolve) => setTimeout(resolve, ms));
+
+  /**
+   * Delays execution for a specified time.
+   * @param ms - Milliseconds to delay.
+   * @returns Promise that resolves after the delay.
+   */
+  private static async delay(ms: number): Promise<boolean> {
+    await new Promise((resolve) => {
+      setTimeout(() => {
+        resolve(true);
+      }, ms);
+    });
+    return true;
   }
-  private async uploadChunkWithRetry(
-    partParams: AWS.S3.UploadPartRequest,
-    attempt: number = 1
-  ): Promise<Part> {
+
+  /**
+   * Uploads a chunk with retry logic.
+   * @param partParams - Parameters for the chunk upload.
+   * @param onProgress - Callback for progress updates.
+   * @param attempt - Current attempt number.
+   * @param strategy - Upload strategy (serial or parallel).
+   * @param chunkId - ID of the chunk.
+   * @returns Promise resolving to the uploaded part information.
+   */
+  private async uploadChunkWithRetry({
+    partParams,
+    onProgress,
+    attempt = 1,
+    strategy = "serial",
+    chunkId,
+  }: {
+    partParams: AWS.S3.UploadPartRequest;
+    onProgress?: (event: ProgressEvent) => void;
+    attempt: number;
+    strategy?: Strategy;
+    chunkId: number;
+  }): Promise<Part> {
     try {
-      const part = await this.s3.uploadPart(partParams).promise();
+      const handleParallelProgress = ({ loaded }: { loaded: number }) => {
+        this.parallelProgressTracker[chunkId] = loaded;
+        const totalChunksizeUploaded: number = Object.values(
+          this.parallelProgressTracker
+        ).reduce((acc: number, curr: number) => acc + curr, 0);
+        const progress = Math.round(
+          (totalChunksizeUploaded / this.totalFileSize) * 100
+        );
+        if (onProgress && typeof onProgress === "function") {
+          let totalProgress = progress;
+          if (totalProgress > 99) {
+            totalProgress = 99;
+          }
+          onProgress({ progress: totalProgress });
+        }
+      };
+
+      let localProgress = 0;
+      const handleSerialProgress = ({
+        loaded,
+        total,
+      }: {
+        loaded: number;
+        total: number;
+      }) => {
+        const progress = (loaded / total) * 100;
+        const progressOutOfTotalChunks = Math.round(
+          progress / this.totalChunks
+        );
+        localProgress = progressOutOfTotalChunks;
+        if (onProgress && typeof onProgress === "function") {
+          let totalProgress = this.totalProgress + progressOutOfTotalChunks;
+          if (totalProgress > 99) {
+            totalProgress = 99;
+          }
+          onProgress({ progress: totalProgress });
+        }
+      };
+
+      const part = await this.s3
+        .uploadPart(partParams)
+        .on("httpUploadProgress", ({ loaded, total }) => {
+          if (strategy === "serial") {
+            handleSerialProgress({ loaded, total });
+            return;
+          }
+          handleParallelProgress({ loaded });
+        })
+        .promise();
+
+      this.totalProgress += localProgress;
       return { ETag: part.ETag, PartNumber: partParams.PartNumber };
     } catch (error) {
       if (attempt < this.MAX_RETRIES) {
-        await this.delay(1000);
-        return this.uploadChunkWithRetry(partParams, attempt + 1);
+        await ChunkUploader.delay(1000);
+        return this.uploadChunkWithRetry({
+          partParams,
+          onProgress,
+          attempt: attempt + 1,
+          strategy,
+          chunkId,
+        });
       }
       throw error;
     }
   }
 
+  /**
+   * Uploads a media file to S3 in chunks.
+   * @param blob - The media file to upload.
+   * @param bucket - The S3 bucket to upload to.
+   * @param key - The key for the uploaded file.
+   * @param ACL - The ACL for the uploaded file.
+   * @param strategy - The strategy to use for uploading chunks.
+   * @param onProgress - Callback for progress updates.
+   * @returns Promise resolving to the URL of the uploaded file.
+   */
   async uploadMediaInChunks({
     blob,
     bucket,
     key,
     ACL,
     strategy = "serial",
+    onProgress,
   }: {
     blob: Blob;
     bucket: string;
     key: string;
     ACL: AWS.S3.BucketCannedACL;
-    strategy: "parallel" | "serial";
+    strategy?: Strategy;
+    onProgress?: (event: ProgressEvent) => void;
   }): Promise<string | undefined> {
+    this.totalProgress = 0;
+    this.totalFileSize = blob.size;
     const chunks = [];
     let offset = 0;
-
     while (offset < blob.size) {
       let end = offset + this.MIN_CHUNK_SIZE;
       if (end > blob.size) {
@@ -87,6 +189,7 @@ class ChunkUploader {
       chunks.push(chunk);
       offset += this.MIN_CHUNK_SIZE;
     }
+    this.totalChunks = chunks.length;
     const multipartParams: AWS.S3.CreateMultipartUploadRequest = {
       Bucket: bucket,
       Key: key,
@@ -110,7 +213,14 @@ class ChunkUploader {
           UploadId: uploadId,
           Body: chunk,
         };
-        const part = await this.uploadChunkWithRetry(partParams);
+        // eslint-disable-next-line no-await-in-loop
+        const part = await this.uploadChunkWithRetry({
+          partParams,
+          onProgress,
+          strategy,
+          chunkId: index,
+          attempt: 1,
+        });
         temp.push(part);
       }
     } else if (strategy === "parallel") {
@@ -122,7 +232,13 @@ class ChunkUploader {
           UploadId: uploadId,
           Body: chunk,
         };
-        return this.uploadChunkWithRetry(partParams);
+        return this.uploadChunkWithRetry({
+          partParams,
+          onProgress,
+          strategy,
+          chunkId: index,
+          attempt: 1,
+        });
       });
       temp = await Promise.all(partsPromises);
     }
