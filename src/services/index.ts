@@ -2,6 +2,9 @@ import AWS from "aws-sdk";
 
 type Part = { ETag: string | undefined; PartNumber: number };
 
+export type OnProgressEvent = { progress: number };
+type TOnProgress = (event: OnProgressEvent) => void;
+
 /**
  * Uploads a media file to S3 in chunks.
  *
@@ -12,6 +15,7 @@ type Part = { ETag: string | undefined; PartNumber: number };
  * @param {AWS.S3.BucketCannedACL} params.ACL - The ACL for the uploaded file.
  * @param {"parallel" | "serial"} [params.strategy="serial"] - The strategy to use for uploading chunks.
  *        "serial" uploads chunks one after another, while "parallel" uploads chunks concurrently.
+ * @param {TOnProgress} [params.onProgress] - A callback function that is called with the upload progress.
  *
  * @returns {Promise<string | undefined>} - The URL of the uploaded file, or undefined if the upload fails.
  *
@@ -75,7 +79,7 @@ class ChunkUploader {
     key: string;
     ACL: AWS.S3.BucketCannedACL;
     strategy: "parallel" | "serial";
-    onProgress?: (progress: number) => void;
+    onProgress?: TOnProgress;
   }): Promise<string | undefined> {
     const chunks = [];
     let offset = 0;
@@ -118,7 +122,7 @@ class ChunkUploader {
         uploadedBytes += chunk.size;
         if (onProgress) {
           const progress = (uploadedBytes / blob.size) * 100;
-          onProgress(progress);
+          onProgress({ progress });
         }
       }
     } else if (strategy === "parallel") {
@@ -134,7 +138,7 @@ class ChunkUploader {
           uploadedBytes += chunk.size;
           if (onProgress) {
             const progress = (uploadedBytes / blob.size) * 100;
-            onProgress(progress);
+            onProgress({ progress });
           }
           return part;
         });
